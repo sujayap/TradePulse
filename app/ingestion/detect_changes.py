@@ -1,6 +1,5 @@
 from datetime import datetime, timezone
 
-from sqlalchemy import func
 from sqlalchemy.orm import sessionmaker
 
 from app.database import engine
@@ -9,6 +8,7 @@ from app.models import (
     DocumentVersion,
     ChangeEvent,
     MonitoringRun,
+    Source,
 )
 
 from app.ingestion.dgft_notifications import (
@@ -37,17 +37,18 @@ def detect_changes():
     changed = 0
     unchanged = 0
     failed = 0
-
     run_id = None
 
     try:
-        # Select documents with the oldest monitoring timestamps.
-        # Documents never checked are prioritized first.
+        # Monitor only captured documents from real sources.
+        # Integration-test records are excluded.
         document_ids = [
             row[0]
             for row in (
                 session.query(Document.id)
                 .join(DocumentVersion)
+                .join(Source, Document.source_id == Source.id)
+                .filter(Source.source_type != "test")
                 .group_by(Document.id)
                 .order_by(
                     Document.last_monitored_at.asc().nullsfirst(),
@@ -84,8 +85,8 @@ def detect_changes():
                 document = session.get(Document, document_id)
 
                 print("\n--------------------------------")
-                print(f"Notification: {document.notice_number}")
-                print(f"Title: {document.title}")
+                print("Notification:", document.notice_number)
+                print("Title:", document.title)
 
                 latest_version = (
                     session.query(DocumentVersion)
@@ -95,9 +96,8 @@ def detect_changes():
                 )
 
                 if latest_version is None:
-                    raise ValueError("No previous document version found.")
+                    raise ValueError("No previous version found.")
 
-                # Download the current source document.
                 content, document_type = download_document(document.document_url)
 
                 new_hash = calculate_sha256(content)
@@ -105,7 +105,6 @@ def detect_changes():
                 print("Downloaded successfully.")
                 print("SHA-256:", new_hash)
 
-                # Compare with the latest stored fingerprint.
                 if new_hash == latest_version.sha256:
                     print("Result: No changes detected.")
                     unchanged += 1
@@ -117,7 +116,7 @@ def detect_changes():
                     )
 
                     if not extracted_text.strip():
-                        raise ValueError("Extracted document text is empty.")
+                        raise ValueError("Extracted text is empty.")
 
                     new_version_number = latest_version.version_number + 1
 
@@ -151,7 +150,6 @@ def detect_changes():
 
                     changed += 1
 
-                # Record the monitoring attempt.
                 document.last_monitored_at = utc_now()
 
                 session.commit()
@@ -167,15 +165,12 @@ def detect_changes():
                     error,
                 )
 
-                # Record failed attempts too, so a broken source
-                # does not monopolize every monitoring batch.
                 document = session.get(Document, document_id)
 
                 if document is not None:
                     document.last_monitored_at = utc_now()
                     session.commit()
 
-        # Update the monitoring run.
         run = session.get(MonitoringRun, run_id)
 
         run.finished_at = utc_now()

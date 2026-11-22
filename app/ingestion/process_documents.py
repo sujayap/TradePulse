@@ -5,7 +5,13 @@ from sqlalchemy import select, func
 from sqlalchemy.orm import Session
 
 from app.database import engine
-from app.models import Document, DocumentVersion, ChangeEvent, MonitoringRun
+from app.models import (
+    Document,
+    DocumentVersion,
+    ChangeEvent,
+    MonitoringRun,
+    Source,
+)
 
 from app.ingestion.dgft_notifications import (
     download_document,
@@ -18,16 +24,22 @@ STORAGE_DIR = Path("data/documents")
 
 
 def process_documents():
-
     STORAGE_DIR.mkdir(parents=True, exist_ok=True)
 
     with Session(engine) as session:
-
-        # Find documents that have not been downloaded and versioned.
+        # Select only documents that have no stored version.
+        # Exclude integration-test sources.
         documents = session.scalars(
             select(Document)
-            .outerjoin(DocumentVersion, Document.id == DocumentVersion.document_id)
-            # .where(Document.document_url.ilike("%.docx"))
+            .join(Source, Document.source_id == Source.id)
+            .outerjoin(
+                DocumentVersion,
+                Document.id == DocumentVersion.document_id,
+            )
+            .where(
+                DocumentVersion.id.is_(None),
+                Source.source_type != "test",
+            )
             .order_by(Document.id)
             .limit(BATCH_SIZE)
         ).all()
@@ -39,7 +51,9 @@ def process_documents():
         source_id = documents[0].source_id
 
         run = MonitoringRun(
-            source_id=source_id, started_at=datetime.now(timezone.utc), status="running"
+            source_id=source_id,
+            started_at=datetime.now(timezone.utc),
+            status="running",
         )
 
         session.add(run)
@@ -51,44 +65,37 @@ def process_documents():
         print(f"Documents selected: {len(documents)}")
 
         for document in documents:
-
             print("\n--------------------------------")
             print("Notification:", document.notice_number)
             print("Title:", document.title)
-            print("URL:", document.document_url)
 
             try:
-                # Download the original document.
                 content, document_type = download_document(document.document_url)
 
-                # Calculate fingerprint from original bytes.
                 fingerprint = calculate_sha256(content)
 
-                # Extract document text.
-                extracted_text, extraction_method = extract_text(content, document_type)
+                extracted_text, extraction_method = extract_text(
+                    content,
+                    document_type,
+                )
 
                 if not extracted_text.strip():
                     raise ValueError("No text could be extracted.")
 
-                # Store original file using its fingerprint.
-                extension = document_type
-                file_path = STORAGE_DIR / f"{fingerprint}.{extension}"
+                file_path = STORAGE_DIR / f"{fingerprint}.{document_type}"
 
                 if not file_path.exists():
                     file_path.write_bytes(content)
 
-                # Determine next version number.
                 latest_version = session.scalar(
                     select(func.max(DocumentVersion.version_number)).where(
                         DocumentVersion.document_id == document.id
                     )
                 )
 
-                version_number = (latest_version or 0) + 1
-
                 version = DocumentVersion(
                     document_id=document.id,
-                    version_number=version_number,
+                    version_number=(latest_version or 0) + 1,
                     sha256=fingerprint,
                     extracted_text=extracted_text,
                     downloaded_at=datetime.now(timezone.utc),
@@ -97,7 +104,6 @@ def process_documents():
                 session.add(version)
                 session.flush()
 
-                # Initial capture: no earlier version was stored.
                 event = ChangeEvent(
                     document_id=document.id,
                     event_type="initial_capture",
@@ -120,20 +126,20 @@ def process_documents():
                 print("Extraction:", extraction_method)
                 print("Characters:", len(extracted_text))
                 print("SHA-256:", fingerprint)
-                print("Version:", version_number)
                 print("Saved successfully.")
 
             except Exception as error:
                 session.rollback()
                 failed += 1
+                print(
+                    "Processing failed:",
+                    type(error).__name__,
+                    error,
+                )
 
-                print("Processing failed:", type(error).__name__, error)
-
-        # Update monitoring run.
         run = session.get(MonitoringRun, run.id)
-
         run.records_found = len(documents)
-        run.new_documents = 0
+        run.new_documents = processed
         run.changed_documents = 0
         run.status = "success" if failed == 0 else "partial_success"
         run.error_message = f"{failed} document(s) failed." if failed else None

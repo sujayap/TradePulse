@@ -1,0 +1,38 @@
+name: TradePulse Daily Monitoring
+
+on:
+  schedule:
+    - cron: "30 2 * * *"
+  workflow_dispatch:
+
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+
+    env:
+      DB_HOST: ${{ secrets.DB_HOST }}
+      DB_PORT: "5432"
+      DB_NAME: ${{ secrets.DB_NAME }}
+      DB_USER: ${{ secrets.DB_USER }}
+      DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Sync DGFT notifications
+        run: python -m app.ingestion.sync_dgft_metadata
+
+      - name: Process new documents
+        run: python -m app.ingestion.process_documents
+
+      - name: Detect document changes
+        run: python -m app.ingestion.detect_changes
