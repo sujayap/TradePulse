@@ -1,0 +1,5 @@
+TRADEPULSE CHANGE DETECTION TEST
+
+Version: 1
+
+This is the original regulatory document content.
